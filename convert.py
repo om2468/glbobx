@@ -13,8 +13,11 @@ import logging
 import sys
 import time
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Iterable
+from zipfile import ZipFile
 
 try:  # noqa: SIM105 - handled for runtime dependency messaging
 	import trimesh  # type: ignore
@@ -122,6 +125,65 @@ def convert_file(src: Path, dst_root: Path, input_root: Path, overwrite: bool) -
 	except Exception:  # noqa: BLE001
 		LOGGER.exception("Failed to convert %s", src)
 		return "failed"
+
+
+def convert_glb_bytes(payload: bytes, filename: str = "model.glb") -> tuple[bytes, list[str]]:
+	"""Convert an in-memory GLB payload and return a ZIP archive of outputs.
+
+	Parameters
+	----------
+	payload:
+		Raw GLB file bytes.
+	filename:
+		Original file name (used for extensions and default archive naming).
+
+	Returns
+	-------
+	archive_bytes:
+		Bytes of a ZIP archive containing generated artefacts.
+	artefacts:
+		Relative paths of files stored in the ZIP.
+
+	Raises
+	------
+	ValueError
+		If the payload is empty.
+	RuntimeError
+		If conversion fails or produces no files.
+	"""
+
+	if not payload:
+		raise ValueError("GLB payload is empty")
+
+	with TemporaryDirectory() as tmp_dir:
+		tmp_path = Path(tmp_dir)
+		input_dir = tmp_path / "input"
+		output_dir = tmp_path / "output"
+		input_dir.mkdir(parents=True, exist_ok=True)
+		output_dir.mkdir(parents=True, exist_ok=True)
+
+		src_name = Path(filename).name or "model.glb"
+		src_path = input_dir / src_name
+		src_path.write_bytes(payload)
+
+		result = convert_file(src_path, output_dir, input_dir, overwrite=True)
+		if result == "failed":
+			raise RuntimeError("Conversion failed; see logs for details")
+
+		produced_files = [p for p in output_dir.rglob("*") if p.is_file()]
+		if not produced_files:
+			raise RuntimeError("Conversion completed but produced no files")
+
+		zip_buffer = BytesIO()
+		artefacts: list[str] = []
+		with ZipFile(zip_buffer, "w") as zip_file:
+			for artefact in produced_files:
+				rel_path = artefact.relative_to(output_dir)
+				zip_file.write(artefact, arcname=str(rel_path))
+				artefacts.append(str(rel_path))
+
+		zip_buffer.seek(0)
+		return zip_buffer.getvalue(), artefacts
 
 
 def run_conversion(args: argparse.Namespace) -> ConversionStats:
